@@ -18,17 +18,13 @@ from ibc_manager import (
 )
 from component   import (
     build_ibc_group,
-    chart_dues_per_ibc,
-    chart_recovered_per_ibc,
-    chart_recovery_rate,
-    chart_customer_distribution,
     render_executive_summary,
     render_month_comparison,
     render_consumer_segmentation,
     render_export_buttons,
 )
 
-# ── Page Config
+# ── Page Config 
 st.set_page_config(
     page_title="SRC Portfolio Dashboard",
     page_icon="⚡",
@@ -71,7 +67,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    uploaded_file = None
+    uploaded_file    = None
     selected_cluster = "All Clusters"
     selected_ibc     = "All IBCs"
     selected_cycle   = "All Cycle Days"
@@ -120,31 +116,52 @@ if st.session_state["page"] == "settings":
     render_settings_page()
     st.stop()
 
-# ── Load Data
+# ── Load Data 
 file_source = uploaded_file if uploaded_file else "src_data.xlsx"
 df_raw = load_data(file_source)
 df_raw = df_raw.loc[:, ~df_raw.columns.duplicated(keep="first")]
-df     = df_raw.copy()
 
-# ── Apply Filters 
-clusters = get_clusters()
 
-if selected_cluster != "All Clusters" and "IBC Name" in df.columns:
-    df = df[df["IBC Name"].isin(clusters.get(selected_cluster, []))]
+# ── Filter function — cached (single definition)
+@st.cache_data
+def filter_data(
+    _df: pd.DataFrame,
+    cluster: str,
+    ibc: str,
+    cycle: str,
+    status: str,
+    remarks: str,
+    cluster_ibcs: tuple,
+) -> pd.DataFrame:
+    df = _df.copy()
+    if cluster != "All Clusters" and "IBC Name" in df.columns and len(cluster_ibcs) > 0:
+        df = df[df["IBC Name"].isin(list(cluster_ibcs))]
+    if ibc != "All IBCs" and "IBC Name" in df.columns:
+        df = df[df["IBC Name"] == ibc]
+    if cycle != "All Cycle Days" and "Cycle Day" in df.columns:
+        df = df[df["Cycle Day"] == cycle]
+    if status != "All Status" and "Status" in df.columns:
+        df = df[df["Status"].astype(str).str.strip() == status]
+    if remarks != "All Remarks":
+        rem_col = next((c for c in df.columns if "remark" in c.lower()), None)
+        if rem_col:
+            df = df[df[rem_col].astype(str).str.strip() == remarks]
+    return df
 
-if selected_ibc != "All IBCs" and "IBC Name" in df.columns:
-    df = df[df["IBC Name"] == selected_ibc]
 
-if selected_cycle != "All Cycle Days" and "Cycle Day" in df.columns:
-    df = df[df["Cycle Day"] == selected_cycle]
+clusters     = get_clusters()
+cluster_ibcs = tuple(clusters.get(selected_cluster, []))
 
-if selected_status != "All Status" and "Status" in df.columns:
-    df = df[df["Status"].astype(str).str.strip() == selected_status]
-
-if selected_remarks != "All Remarks":
-    rem_col = next((c for c in df.columns if "remark" in c.lower()), None)
-    if rem_col:
-        df = df[df[rem_col].astype(str).str.strip() == selected_remarks]
+# ── Actual function call — this was MISSING before 
+df = filter_data(
+    df_raw,
+    selected_cluster,
+    selected_ibc,
+    selected_cycle,
+    selected_status,
+    selected_remarks,
+    cluster_ibcs,
+)
 
 if auto_refresh:
     time.sleep(0.1)
@@ -173,7 +190,7 @@ st.markdown("---")
 # ── Executive Summary — 28 KPI Cards + IBC Table + Charts 
 render_executive_summary(df)
 
-# ── Rest of Dashboard 
+# ── Rest of Dashboard
 if "IBC Name" in df.columns:
     render_month_comparison(df)
     render_consumer_segmentation(df)
@@ -187,7 +204,7 @@ if "IBC Name" in df.columns:
 else:
     st.error("❌ 'IBC Name' column not found.")
 
-# ── Footer
+# ── Footer 
 st.markdown("---")
 st.markdown(
     "<div style='text-align:center;font-size:0.72rem;color:#6e7681;padding:8px 0'>"

@@ -545,31 +545,30 @@ def render_executive_summary(df: pd.DataFrame) -> None:
     df = df.copy()
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
 
-    # ── Detect month columns ──────────────────────────────────────────────────
+    # ── Detect month columns 
     MONTHS = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
     billing_cols = sorted([c for c in df.columns if re.search(rf"billing.*{MONTHS}", c.lower())])
     cash_cols    = sorted([c for c in df.columns if re.search(rf"^cash.*{MONTHS}", c.lower()) and "date" not in c.lower()])
     stubs_cols   = sorted([c for c in df.columns if re.search(rf"^stubs.*{MONTHS}", c.lower()) and "uni" not in c.lower()])
 
-    curr_bill_col  = billing_cols[-1]  if billing_cols          else None
+    curr_bill_col  = billing_cols[-1]  if billing_cols           else None
     prev_bill_col  = billing_cols[-2]  if len(billing_cols) >= 2 else None
-    curr_cash_col  = cash_cols[-1]     if cash_cols             else None
+    curr_cash_col  = cash_cols[-1]     if cash_cols              else None
     prev_cash_col  = cash_cols[-2]     if len(cash_cols)  >= 2  else None
-    curr_stubs_col = stubs_cols[-1]    if stubs_cols            else None
+    curr_stubs_col = stubs_cols[-1]    if stubs_cols             else None
     prev_stubs_col = stubs_cols[-2]    if len(stubs_cols) >= 2  else None
 
     curr_month = (curr_cash_col or "").replace("Cash","").strip(" '") if curr_cash_col else "CM"
     prev_month = (prev_cash_col or "").replace("Cash","").strip(" '") if prev_cash_col else "LM"
 
-    # Days in each month
-    curr_days = 31  # May
-    prev_days = 30  # Apr
+    curr_days = 31
+    prev_days = 30
 
     if "IBC Name" not in df.columns:
         st.warning("IBC Name column not found.")
         return
 
-   # ── Get target RR + Potential Target 
+    # ── Get Target RR + Potential Target 
     try:
         from ibc_manager import get_target_rr, get_potential_target
         target_rr_map        = get_target_rr()
@@ -578,98 +577,109 @@ def render_executive_summary(df: pd.DataFrame) -> None:
         target_rr_map        = {}
         potential_target_map = {}
 
-    # ── Total cash for contribution calculation 
-    total_cash_all = float(df[curr_cash_col].sum()) if curr_cash_col and curr_cash_col in df.columns else 1
+    # ── Vectorized groupby 
+    agg_dict = {"IBC Name": "count"}
+    agg_dict["IBC Name"] = "count"
 
-    # ── Build per-IBC rows 
-    ibc_list = df["IBC Name"].dropna().unique().tolist()
-    rows = []
+    def safe_agg(col):
+        return (col, "sum") if col and col in df.columns else ("IBC Name", "count")
 
-    for ibc in ibc_list:
-        d = df[df["IBC Name"] == ibc]
+    grp = df.groupby("IBC Name", as_index=False).agg(
+        Cases    =("IBC Name",       "count"),
+        Dues     =safe_agg("Dues"),
+        Billing  =safe_agg(curr_bill_col),
+        Cash     =safe_agg(curr_cash_col),
+        LM_Cash  =safe_agg(prev_cash_col),
+        Stubs    =safe_agg(curr_stubs_col),
+        LM_Stubs =safe_agg(prev_stubs_col),
+    )
 
-        cases        = len(d)
-        dues         = float(d["Dues"].sum())                              if "Dues"          in d.columns else 0
-        billing      = float(d[curr_bill_col].sum())                       if curr_bill_col   in d.columns else 0
-        cash         = float(d[curr_cash_col].sum())                       if curr_cash_col   in d.columns else 0
-        lm_cash      = float(d[prev_cash_col].sum())                       if prev_cash_col   in d.columns else 0
-        stubs        = int(d[curr_stubs_col].sum())                        if curr_stubs_col  in d.columns else 0
-        lm_stubs     = int(d[prev_stubs_col].sum())                        if prev_stubs_col  in d.columns else 0
+    # Ensure numeric
+    for col in ["Dues", "Billing", "Cash", "LM_Cash", "Stubs", "LM_Stubs"]:
+        if col not in grp.columns:
+            grp[col] = 0.0
+        grp[col] = pd.to_numeric(grp[col], errors="coerce").fillna(0)
 
-        stubs_var    = stubs - lm_stubs
-        pr           = (stubs / cases )           if cases    > 0 else 0
-        rr           = (cash  / billing )         if billing  > 0 else 0
-        contribution = (cash  / total_cash_all )  if total_cash_all > 0 else 0
-        target_rr    = float(target_rr_map.get(ibc, 80.0))
-        rr_deficit   = rr - target_rr
-        target_amt   = billing * target_rr / 100
-        amt_deficit  = target_amt - cash
-        tgt_achv_pct = (cash / target_amt )       if target_amt > 0 else 0
-        avg_stub_rec = (cash / stubs)                   if stubs    > 0 else 0
-        potential_tgt = float(potential_target_map.get(ibc, 0.0))
-        pot_deficit  = potential_tgt - cash
-        pot_tgt_achv = (cash / potential_tgt )    if potential_tgt > 0 else 0
-        pot_rr       = (potential_tgt / billing ) if billing  > 0 else 0
-        pot_rr_def   = pot_rr - rr
-        surplus_lm   = cash - lm_cash
-        apr_avg_day  = lm_cash / prev_days
-        may_avg_day  = cash / curr_days
+    total_cash_all = grp["Cash"].sum() if grp["Cash"].sum() > 0 else 1
 
-        rows.append({
-            "IBC":                      ibc,
-            "Cases":                    cases,
-            "Dues":                     dues,
-            f"Billing {curr_month}":    billing,
-            f"Cash {curr_month}":       cash,
-            f"Cash {prev_month}":       lm_cash,
-            "Stubs":                    stubs,
-            "LM Stubs":                 lm_stubs,
-            "Stubs Var.":               stubs_var,
-            "PR %":                     pr,
-            "RR %":                     rr,
-            "Contribution %":           contribution,
-            "Target RR %":              target_rr,
-            "RR Deficit":               rr_deficit,
-            "Target Amount":            target_amt,
-            "Amount Deficit":           amt_deficit,
-            "Target Achievement %":     tgt_achv_pct,
-            "Avg Stub Recovery":        avg_stub_rec,
-            "Potential Target":         potential_tgt,
-            "Potential Deficit":        pot_deficit,
-            "Potential Target Achv %":  pot_tgt_achv,
-            "Potential RR %":           pot_rr,
-            "Potential RR Deficit":     pot_rr_def,
-            "Surplus/Deficit LM":       surplus_lm,
-            f"{prev_month} Avg/Day":    apr_avg_day,
-            f"{curr_month} Avg/Day":    may_avg_day,
-        })
+    grp["Stubs_Var"]    = grp["Stubs"]   - grp["LM_Stubs"]
+    grp["PR"]           = (grp["Stubs"]   / grp["Cases"].replace(0, pd.NA)).fillna(0)
+    grp["RR"]           = (grp["Cash"]    / grp["Billing"].replace(0, pd.NA)).fillna(0)
+    grp["Contribution"] = (grp["Cash"]    / total_cash_all)
+    grp["Target_RR"]    = grp["IBC Name"].map(lambda x: float(target_rr_map.get(x, 80.0)) / 100)
+    grp["RR_Deficit"]   = grp["RR"]       - grp["Target_RR"]
+    grp["Target_Amt"]   = grp["Billing"]  * grp["Target_RR"]
+    grp["Amt_Deficit"]  = grp["Target_Amt"] - grp["Cash"]
+    grp["Tgt_Achv"]     = (grp["Cash"]    / grp["Target_Amt"].replace(0, pd.NA)).fillna(0)
+    grp["Avg_Stub_Rec"] = (grp["Cash"]    / grp["Stubs"].replace(0, pd.NA)).fillna(0)
+    grp["Pot_Tgt"]      = grp["IBC Name"].map(lambda x: float(potential_target_map.get(x, 0.0)))
+    grp["Pot_Deficit"]  = grp["Pot_Tgt"]  - grp["Cash"]
+    grp["Pot_Achv"]     = (grp["Cash"]    / grp["Pot_Tgt"].replace(0, pd.NA)).fillna(0)
+    grp["Pot_RR"]       = (grp["Pot_Tgt"] / grp["Billing"].replace(0, pd.NA)).fillna(0)
+    grp["Pot_RR_Def"]   = grp["Pot_RR"]   - grp["RR"]
+    grp["Surplus_LM"]   = grp["Cash"]     - grp["LM_Cash"]
+    grp["Prev_Avg_Day"] = grp["LM_Cash"]  / prev_days
+    grp["Curr_Avg_Day"] = grp["Cash"]     / curr_days
+    grp = grp.fillna(0)
+    
+    # ── Grand Total row add karo ─────────────────────────────────────────────
+    grand_total = pd.DataFrame([{
+        "IBC Name":  "🏁 GRAND TOTAL",
+        "Cases":     grp["Cases"].sum(),
+        "Dues":      grp["Dues"].sum(),
+        "Billing":   grp["Billing"].sum(),
+        "Cash":      grp["Cash"].sum(),
+        "LM_Cash":   grp["LM_Cash"].sum(),
+        "Stubs":     grp["Stubs"].sum(),
+        "LM_Stubs":  grp["LM_Stubs"].sum(),
+        "Stubs_Var": grp["Stubs"].sum() - grp["LM_Stubs"].sum(),
+        "PR":        (grp["Stubs"].sum() / grp["Cases"].sum())  if grp["Cases"].sum()  > 0 else 0,
+        "RR":        (grp["Cash"].sum()  / grp["Billing"].sum()) if grp["Billing"].sum() > 0 else 0,
+        "Contribution": 1.0,
+        "Target_RR": grp["Target_RR"].mean(),
+        "RR_Deficit": grp["Target_RR"].mean() - ((grp["Cash"].sum() / grp["Billing"].sum()) if grp["Billing"].sum() > 0 else 0),
+        "Target_Amt": grp["Target_Amt"].sum(),
+        "Amt_Deficit": grp["Amt_Deficit"].sum(),
+        "Tgt_Achv":  (grp["Cash"].sum() / grp["Target_Amt"].sum())   if grp["Target_Amt"].sum()  > 0 else 0,
+        "Avg_Stub_Rec": (grp["Cash"].sum() / grp["Stubs"].sum())     if grp["Stubs"].sum()       > 0 else 0,
+        "Pot_Tgt":   grp["Pot_Tgt"].sum(),
+        "Pot_Deficit": grp["Pot_Deficit"].sum(),
+        "Pot_Achv":  (grp["Cash"].sum() / grp["Pot_Tgt"].sum())      if grp["Pot_Tgt"].sum()     > 0 else 0,
+        "Pot_RR":    (grp["Pot_Tgt"].sum() / grp["Billing"].sum())   if grp["Billing"].sum()     > 0 else 0,
+        "Pot_RR_Def": 0,
+        "Surplus_LM": grp["Surplus_LM"].sum(),
+        "Prev_Avg_Day": grp["LM_Cash"].sum() / prev_days,
+        "Curr_Avg_Day": grp["Cash"].sum()    / curr_days,
+    }])
+    grand_total["Pot_RR_Def"] = grand_total["Pot_RR"] - grand_total["RR"]
 
-    summary_df = pd.DataFrame(rows)
+    grp_with_total = pd.concat([grp, grand_total], ignore_index=True)
 
-    # ── Grand Total 
-    total_cases    = int(summary_df["Cases"].sum())
-    total_dues     = summary_df["Dues"].sum()
-    total_billing  = summary_df[f"Billing {curr_month}"].sum()
-    total_cash     = summary_df[f"Cash {curr_month}"].sum()
-    total_lm_cash  = summary_df[f"Cash {prev_month}"].sum()
-    total_stubs    = int(summary_df["Stubs"].sum())
-    total_lm_stubs = int(summary_df["LM Stubs"].sum())
+    # ── Totals 
+    total_cases    = int(grp["Cases"].sum())
+    total_dues     = grp["Dues"].sum()
+    total_billing  = grp["Billing"].sum()
+    total_cash     = grp["Cash"].sum()
+    total_lm_cash  = grp["LM_Cash"].sum()
+    total_stubs    = int(grp["Stubs"].sum())
+    total_lm_stubs = int(grp["LM_Stubs"].sum())
     total_stubs_v  = total_stubs - total_lm_stubs
-    total_pr       = (total_stubs / total_cases)    if total_cases   > 0 else 0
-    total_rr       = (total_cash  / total_billing)  if total_billing > 0 else 0
-    total_tgt_amt  = summary_df["Target Amount"].sum()
-    total_amt_def  = summary_df["Amount Deficit"].sum()
-    total_tgt_achv = (total_cash / total_tgt_amt)   if total_tgt_amt > 0 else 0
-    total_avg_stub = (total_cash / total_stubs)            if total_stubs   > 0 else 0
-    total_pot_tgt  = summary_df["Potential Target"].sum()
-    total_pot_def  = summary_df["Potential Deficit"].sum()
-    total_pot_achv = (total_cash / total_pot_tgt )   if total_pot_tgt > 0 else 0
-    total_pot_rr   = (total_pot_tgt / total_billing )if total_billing > 0 else 0
-    total_surplus  = total_cash - total_lm_cash
+    total_pr       = (total_stubs  / total_cases)   if total_cases   > 0 else 0
+    total_rr       = (total_cash   / total_billing) if total_billing > 0 else 0
+    total_tgt_rr   = grp["Target_RR"].mean()
+    total_tgt_amt  = grp["Target_Amt"].sum()
+    total_amt_def  = grp["Amt_Deficit"].sum()
+    total_tgt_achv = (total_cash  / total_tgt_amt)  if total_tgt_amt > 0 else 0
+    total_avg_stub = (total_cash  / total_stubs)     if total_stubs   > 0 else 0
+    total_pot_tgt  = grp["Pot_Tgt"].sum()
+    total_pot_def  = grp["Pot_Deficit"].sum()
+    total_pot_achv = (total_cash  / total_pot_tgt)  if total_pot_tgt > 0 else 0
+    total_pot_rr   = (total_pot_tgt / total_billing) if total_billing > 0 else 0
+    total_surplus  = total_cash   - total_lm_cash
     total_apr_avg  = total_lm_cash / prev_days
     total_may_avg  = total_cash    / curr_days
 
-    # ── KPI CARDS — 28 cards in 7 rows of 4
+    # ── KPI Cards 
     st.markdown('<div class="section-header">Key Performance Indicators</div>', unsafe_allow_html=True)
 
     def kpi(col, color, label, value, sub=""):
@@ -679,121 +689,121 @@ def render_executive_summary(df: pd.DataFrame) -> None:
                 f'<div class="kpi-label">{label}</div>'
                 f'<div class="kpi-value">{value}</div>'
                 f'<div class="kpi-sub">{sub}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
+                f'</div>', unsafe_allow_html=True,
             )
 
-    # Row 1 — Volume
     r1 = st.columns(4)
-    kpi(r1[0], "blue",   "Total Cases",          f"{total_cases:,}",                    "All IBCs")
-    kpi(r1[1], "red",    "Total Dues",            fmt_currency(total_dues),               "Outstanding")
-    kpi(r1[2], "yellow", f"Billing {curr_month}", fmt_currency(total_billing),            "Current Month")
-    kpi(r1[3], "green",  f"Cash {curr_month}",    fmt_currency(total_cash),               "Recovered")
+    kpi(r1[0], "blue",   "Total Cases",          f"{total_cases:,}",           "All IBCs")
+    kpi(r1[1], "red",    "Total Dues",            fmt_currency(total_dues),      "Outstanding")
+    kpi(r1[2], "yellow", f"Billing {curr_month}", fmt_currency(total_billing),   "Current Month")
+    kpi(r1[3], "green",  f"Cash {curr_month}",    fmt_currency(total_cash),      "Recovered")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 2 — Stubs
     r2 = st.columns(4)
-    kpi(r2[0], "teal",   "Stubs",                 f"{total_stubs:,}",                    f"{curr_month}")
-    kpi(r2[1], "blue",   "LM Stubs",              f"{total_lm_stubs:,}",                 f"{prev_month}")
+    kpi(r2[0], "teal",   "Stubs",           f"{total_stubs:,}",                          f"{curr_month}")
+    kpi(r2[1], "blue",   "LM Stubs",        f"{total_lm_stubs:,}",                       f"{prev_month}")
     kpi(r2[2], "green" if total_stubs_v >= 0 else "red",
-               "Stubs Variance",        f"{'▲' if total_stubs_v>=0 else '▼'} {abs(total_stubs_v):,}", "vs Last Month")
-    kpi(r2[3], "purple", "Performance Rate",      f"{total_pr:.1f}%",                    "Stubs / Cases")
+               "Stubs Variance",  f"{'▲' if total_stubs_v>=0 else '▼'} {abs(total_stubs_v):,}", "vs Last Month")
+    kpi(r2[3], "purple", "Performance Rate", f"{total_pr*100:.1f}%",                     "Stubs / Cases")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 3 — Recovery
     r3 = st.columns(4)
-    kpi(r3[0], "green",  "Recovery Rate",         f"{total_rr:.1f}%",                    "Cash / Billing")
-    kpi(r3[1], "blue",   "Contribution",          "100%",                                "Portfolio Total")
-    kpi(r3[2], "yellow", "Target RR (Avg)",       f"{summary_df['Target RR %'].mean():.1f}%", "IBC Average")
-    kpi(r3[3], "red" if total_rr < summary_df['Target RR %'].mean() else "green",
-               "RR Deficit",            f"{summary_df['Target RR %'].mean()-total_rr:.1f}%", "Target - Actual")
+    kpi(r3[0], "green",  "Recovery Rate",    f"{total_rr*100:.1f}%",                     "Cash / Billing")
+    kpi(r3[1], "blue",   "Contribution",     "100%",                                     "Portfolio Total")
+    kpi(r3[2], "yellow", "Target RR (Avg)",  f"{total_tgt_rr*100:.1f}%",                 "IBC Average")
+    kpi(r3[3], "red" if total_rr < total_tgt_rr else "green",
+               "RR Deficit",       f"{abs((total_tgt_rr - total_rr)*100):.1f}%",         "Target - Actual")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 4 — Target
     r4 = st.columns(4)
-    kpi(r4[0], "yellow", "Target Amount",         fmt_currency(total_tgt_amt),            "Billing × Target RR")
-    kpi(r4[1], "red",    "Amount Deficit",        fmt_currency(total_amt_def),            "Target - Cash")
-    kpi(r4[2], "green" if total_tgt_achv >= 100 else "yellow",
-               "Target Achievement",    f"{total_tgt_achv:.1f}%",                        "Cash / Target Amt")
-    kpi(r4[3], "teal",   "Avg Stub Recovery",     fmt_currency(total_avg_stub),           "Cash / Stubs")
+    kpi(r4[0], "yellow", "Target Amount",    fmt_currency(total_tgt_amt),                "Billing × Target RR")
+    kpi(r4[1], "red",    "Amount Deficit",   fmt_currency(total_amt_def),                "Target - Cash")
+    kpi(r4[2], "green" if total_tgt_achv >= 1 else "yellow",
+               "Target Achievement", f"{total_tgt_achv*100:.1f}%",                      "Cash / Target Amt")
+    kpi(r4[3], "teal",   "Avg Stub Recovery", fmt_currency(total_avg_stub),              "Cash / Stubs")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 5 — Potential
     r5 = st.columns(4)
-    kpi(r5[0], "purple", "Potential Target",      fmt_currency(total_pot_tgt),            "Cases × Avg Stub Rec")
-    kpi(r5[1], "red",    "Potential Deficit",     fmt_currency(total_pot_def),            "Potential - Cash")
-    kpi(r5[2], "green" if total_pot_achv >= 100 else "yellow",
-               "Potential Achv %",      f"{total_pot_achv:.1f}%",                        "Cash / Potential")
-    kpi(r5[3], "blue",   "Potential RR %",        f"{total_pot_rr:.1f}%",                "Potential / Billing")
+    kpi(r5[0], "purple", "Potential Target",  fmt_currency(total_pot_tgt),               "Manually Set")
+    kpi(r5[1], "red",    "Potential Deficit", fmt_currency(total_pot_def),               "Potential - Cash")
+    kpi(r5[2], "green" if total_pot_achv >= 1 else "yellow",
+               "Potential Achv %",  f"{total_pot_achv*100:.1f}%",                       "Cash / Potential")
+    kpi(r5[3], "blue",   "Potential RR %",    f"{total_pot_rr*100:.1f}%",               "Potential / Billing")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 6 — Potential RR Deficit + LM comparison
     r6 = st.columns(4)
-    kpi(r6[0], "red",    "Potential RR Deficit",  f"{total_pot_rr - total_rr:.1f}%",    "Potential RR - RR")
+    kpi(r6[0], "red",    "Potential RR Deficit", f"{(total_pot_rr-total_rr)*100:.1f}%", "Potential RR - RR")
     kpi(r6[1], "green" if total_surplus >= 0 else "red",
-               "Surplus/Deficit LM",    fmt_currency(total_surplus),                     f"Cash vs {prev_month}")
-    kpi(r6[2], "blue",   f"{prev_month} Avg/Day", fmt_currency(total_apr_avg),           f"per day avg")
-    kpi(r6[3], "teal",   f"{curr_month} Avg/Day", fmt_currency(total_may_avg),           f"per day avg")
+               "Surplus/Deficit LM", fmt_currency(total_surplus),                       f"Cash vs {prev_month}")
+    kpi(r6[2], "blue",   f"{prev_month} Avg/Day", fmt_currency(total_apr_avg),          "Per day avg")
+    kpi(r6[3], "teal",   f"{curr_month} Avg/Day", fmt_currency(total_may_avg),          "Per day avg")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Row 7 — LM Cash
     r7 = st.columns(4)
     kpi(r7[0], "purple", f"LM Cash {prev_month}", fmt_currency(total_lm_cash),          "Last Month Recovery")
-    kpi(r7[1], "green" if total_surplus >= 0 else "red",
-               "Day Avg Variance",
-               fmt_currency(total_may_avg - total_apr_avg),
-               f"{curr_month} vs {prev_month} avg/day")
-    kpi(r7[2], "yellow", "Target % Achv (RR)",    f"{total_tgt_achv:.1f}%",             "Cash / Target Amt")
-    kpi(r7[3], "blue",   "Target % Achv (Pot)",   f"{total_pot_achv:.1f}%",             "Cash / Potential")
+    kpi(r7[1], "green" if (total_may_avg - total_apr_avg) >= 0 else "red",
+               "Day Avg Variance",  fmt_currency(total_may_avg - total_apr_avg),        f"{curr_month} vs {prev_month}")
+    kpi(r7[2], "yellow", "Target % Achv (RR)",  f"{total_tgt_achv*100:.1f}%",           "Cash / Target Amt")
+    kpi(r7[3], "blue",   "Target % Achv (Pot)", f"{total_pot_achv*100:.1f}%",           "Cash / Potential")
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── IBC SUMMARY TABLE 
+    # ── IBC Table 
     st.markdown('<div class="section-header">IBC-wise Detailed Summary</div>', unsafe_allow_html=True)
 
-    # Format for display
-    disp = summary_df.copy()
-    money_cols = [f"Billing {curr_month}", f"Cash {curr_month}", f"Cash {prev_month}",
-                  "Dues", "Target Amount", "Amount Deficit", "Avg Stub Recovery",
-                  "Potential Target", "Potential Deficit",
-                  f"{prev_month} Avg/Day", f"{curr_month} Avg/Day", "Surplus/Deficit LM"]
-    pct_cols   = ["PR %", "RR %", "Contribution %", "Target RR %", "RR Deficit",
-                  "Target Achievement %", "Potential Target Achv %",
-                  "Potential RR %", "Potential RR Deficit"]
-    int_cols   = ["Cases", "Stubs", "LM Stubs", "Stubs Var."]
+    disp = grp_with_total[["IBC Name", "Cases", "Dues", "Billing", "Cash", "LM_Cash",
+                "Stubs", "LM_Stubs", "Stubs_Var", "PR", "RR",
+                "Contribution", "Target_RR", "RR_Deficit", "Target_Amt",
+                "Amt_Deficit", "Tgt_Achv", "Avg_Stub_Rec", "Pot_Tgt",
+                "Pot_Deficit", "Pot_Achv", "Pot_RR", "Pot_RR_Def",
+                "Surplus_LM", "Prev_Avg_Day", "Curr_Avg_Day"]].copy()
 
-    for c in money_cols:
+    disp.columns = [
+        "IBC", "Cases", "Dues", f"Billing {curr_month}", f"Cash {curr_month}",
+        f"Cash {prev_month}", "Stubs", "LM Stubs", "Stubs Var",
+        "PR %", "RR %", "Contribution %", "Target RR %", "RR Deficit",
+        "Target Amount", "Amount Deficit", "Target Achv %", "Avg Stub Rec",
+        "Potential Target", "Pot Deficit", "Pot Achv %", "Pot RR %",
+        "Pot RR Deficit", "Surplus/Deficit LM",
+        f"{prev_month} Avg/Day", f"{curr_month} Avg/Day",
+    ]
+
+    # Format
+    money_c = [f"Billing {curr_month}", f"Cash {curr_month}", f"Cash {prev_month}",
+               "Dues", "Target Amount", "Amount Deficit", "Avg Stub Rec",
+               "Potential Target", "Pot Deficit", "Surplus/Deficit LM",
+               f"{prev_month} Avg/Day", f"{curr_month} Avg/Day"]
+    pct_c   = ["PR %", "RR %", "Contribution %", "Target RR %", "RR Deficit",
+               "Target Achv %", "Pot Achv %", "Pot RR %", "Pot RR Deficit"]
+
+    for c in money_c:
         if c in disp.columns:
-            disp[c] = disp[c].apply(lambda x: fmt_currency(x))
-    for c in pct_cols:
+            disp[c] = disp[c].apply(fmt_currency)
+    for c in pct_c:
         if c in disp.columns:
-            disp[c] = disp[c].apply(lambda x: f"{x:.1f}%")
-    for c in int_cols:
-        if c in disp.columns:
-            disp[c] = disp[c].apply(lambda x: f"{int(x):,}")
-    disp["Stubs Var."] = summary_df["Stubs Var."].apply(
-        lambda x: f"{'▲' if x>=0 else '▼'} {abs(int(x)):,}"
-    )
+            disp[c] = disp[c].apply(lambda x: f"{x*100:.1f}%")
+    disp["Cases"]     = disp["Cases"].apply(lambda x: f"{int(x):,}")
+    disp["Stubs"]     = disp["Stubs"].apply(lambda x: f"{int(x):,}")
+    disp["LM Stubs"]  = disp["LM Stubs"].apply(lambda x: f"{int(x):,}")
+    disp["Stubs Var"] = grp_with_total["Stubs_Var"].apply(lambda x: f"{'▲' if x>=0 else '▼'} {abs(int(x)):,}")
 
     st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # ── CHARTS 
-    plot_df = summary_df.copy()
-
+    # ── Charts 
     st.markdown('<div class="section-header">Visual Analysis</div>', unsafe_allow_html=True)
 
     ch1, ch2 = st.columns(2)
     with ch1:
-        colors = ["#22c55e" if r >= t else "#ef4444"
-                  for r, t in zip(plot_df["RR %"], plot_df["Target RR %"])]
+        bar_colors = ["#22c55e" if r >= t else "#ef4444"
+                      for r, t in zip(grp["RR"], grp["Target_RR"])]
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            name="RR %", x=plot_df["IBC"], y=plot_df["RR %"],
-            marker_color=colors, marker_line_width=0,
-            text=[f"{r:.1f}%" for r in plot_df["RR %"]],
+            name="RR %", x=grp["IBC Name"], y=grp["RR"]*100,
+            marker_color=bar_colors, marker_line_width=0,
+            text=[f"{r*100:.1f}%" for r in grp["RR"]],
             textposition="outside", textfont=dict(color="#c9d1d9", size=10),
         ))
         fig.add_trace(go.Scatter(
-            name="Target RR", x=plot_df["IBC"], y=plot_df["Target RR %"],
+            name="Target RR", x=grp["IBC Name"], y=grp["Target_RR"]*100,
             mode="lines+markers", line=dict(color="#f59e0b", dash="dash", width=2),
             marker=dict(size=8),
         ))
@@ -808,11 +818,11 @@ def render_executive_summary(df: pd.DataFrame) -> None:
     with ch2:
         fig2 = go.Figure()
         fig2.add_trace(go.Bar(
-            name=f"Cash {prev_month}", x=plot_df["IBC"], y=plot_df[f"Cash {prev_month}"],
+            name=f"Cash {prev_month}", x=grp["IBC Name"], y=grp["LM_Cash"],
             marker_color="#8b949e", marker_line_width=0,
         ))
         fig2.add_trace(go.Bar(
-            name=f"Cash {curr_month}", x=plot_df["IBC"], y=plot_df[f"Cash {curr_month}"],
+            name=f"Cash {curr_month}", x=grp["IBC Name"], y=grp["Cash"],
             marker_color="#3fb950", marker_line_width=0,
         ))
         fig2.update_layout(
@@ -827,11 +837,11 @@ def render_executive_summary(df: pd.DataFrame) -> None:
     with ch3:
         fig3 = go.Figure()
         fig3.add_trace(go.Bar(
-            name=f"Stubs {prev_month}", x=plot_df["IBC"], y=plot_df["LM Stubs"],
+            name=f"Stubs {prev_month}", x=grp["IBC Name"], y=grp["LM_Stubs"],
             marker_color="#8b949e", marker_line_width=0,
         ))
         fig3.add_trace(go.Bar(
-            name=f"Stubs {curr_month}", x=plot_df["IBC"], y=plot_df["Stubs"],
+            name=f"Stubs {curr_month}", x=grp["IBC Name"], y=grp["Stubs"],
             marker_color="#58a6ff", marker_line_width=0,
         ))
         fig3.update_layout(
@@ -844,9 +854,9 @@ def render_executive_summary(df: pd.DataFrame) -> None:
 
     with ch4:
         fig4 = go.Figure(go.Bar(
-            x=plot_df["IBC"], y=plot_df["Contribution %"],
+            x=grp["IBC Name"], y=grp["Contribution"]*100,
             marker_color="#a371f7", marker_line_width=0,
-            text=[f"{c:.1f}%" for c in plot_df["Contribution %"]],
+            text=[f"{c*100:.1f}%" for c in grp["Contribution"]],
             textposition="outside", textfont=dict(color="#c9d1d9", size=10),
         ))
         fig4.update_layout(
@@ -857,10 +867,10 @@ def render_executive_summary(df: pd.DataFrame) -> None:
         st.plotly_chart(fig4, use_container_width=True, config={"displayModeBar": False})
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # EXPORT 
+    # ── Export 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="Executive Summary", index=False)
+        grp.to_excel(writer, sheet_name="Executive Summary", index=False)
     buf.seek(0)
     st.download_button(
         "📥 Download Executive Summary",

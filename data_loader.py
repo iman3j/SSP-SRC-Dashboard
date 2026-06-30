@@ -38,7 +38,7 @@ def _dedup_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Remove duplicate columns — keep first occurrence."""
     return df.loc[:, ~df.columns.duplicated(keep="first")]
 
-@st.cache_data(ttl=30)
+@st.cache_data
 def load_data(file_source) -> pd.DataFrame:
 
     # ── Read file 
